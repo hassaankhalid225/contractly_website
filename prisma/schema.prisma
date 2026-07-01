@@ -1,0 +1,270 @@
+// Contractly data model.
+//
+// Provider is SQLite so the app runs with zero infra in development.
+// For production, switch `provider` to "postgresql" and point
+// DATABASE_URL at Postgres (see README → Deploying). The schema is
+// written Postgres-compatibly: status/enum-like fields are strings
+// validated in code (src/lib/constants.ts), and JSON payloads are
+// stored as text and parsed in the repository layer.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String  @id @default(cuid())
+  email            String  @unique
+  passwordHash     String?
+  name             String
+  photoUrl         String?
+  whatsapp         String?
+  authProvider     String  @default("email") // email | google
+  emailVerified    Boolean @default(false)
+  // Onboarding survey results
+  workTypes        String  @default("") // comma-separated work types
+  clientVolume     String? // 1-3 | 4-10 | 10+
+  defaultCurrency  String  @default("USD")
+  onboardingDone   Boolean @default(false)
+  // Access control
+  role             String  @default("user") // user | admin
+  suspended        Boolean @default(false)
+  // Billing
+  plan             String  @default("free") // free | solo | agency
+
+  contracts        Contract[]
+  reminders        Reminder[]
+  payments         Payment[]
+  subscription     Subscription?
+  verifications    VerificationToken[]
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model VerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  purpose   String   @default("email_verify") // email_verify | password_reset
+  expiresAt DateTime
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Contract {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title           String
+  clientName      String
+  clientEmail     String?
+  value           Float?
+  currency        String   @default("USD")
+  startDate       DateTime?
+  endDate         DateTime?
+
+  status          String   @default("draft") // draft | active | awaiting_signature | signed | expired | archived
+  source          String   @default("upload") // upload | template
+
+  // Upload source
+  fileKey         String?
+  fileName        String?
+  fileMime        String?
+
+  // Extracted / generated content
+  contentText     String? // plain text used for AI analysis
+  bodyHtml        String? // rich text for template-generated contracts
+  workType        String?
+  paymentSchedule String? // full_upfront | split_50_50 | milestone
+
+  analysis         ContractAnalysis?
+  signatureRequest SignatureRequest?
+  reminders        Reminder[]
+  payments         Payment[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+model ContractAnalysis {
+  id              String   @id @default(cuid())
+  contractId      String   @unique
+  contract        Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  riskScore       Int      // 0-100
+  riskLevel       String   // low | medium | high
+  summary         String
+  clausesJson     String   @default("[]")       // [{title, type, status, text, explanation}]
+  missingJson     String   @default("[]")       // ["IP ownership clause", ...]
+  redFlagsJson    String   @default("[]")       // [{title, why}]
+  paymentTermsJson String  @default("{}")       // {amount, schedule, lateFee}
+  model           String   @default("mock")
+  createdAt       DateTime @default(now())
+}
+
+model SignatureRequest {
+  id          String   @id @default(cuid())
+  contractId  String   @unique
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  token       String   @unique
+  signerName  String
+  signerEmail String
+  message     String?
+  status      String   @default("pending") // pending | viewed | signed | expired | revoked
+  deadline    DateTime?
+  viewedAt    DateTime?
+  signedAt    DateTime?
+  signedPdfKey String?
+
+  fields      SignatureField[]
+  signatures  Signature[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model SignatureField {
+  id        String   @id @default(cuid())
+  requestId String
+  request   SignatureRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  role      String   // freelancer | client
+  type      String   // signature | date | initial
+  page      Int      @default(1)
+  x         Float    @default(0)
+  y         Float    @default(0)
+  w         Float    @default(0.25)
+  h         Float    @default(0.08)
+
+  @@index([requestId])
+}
+
+model Signature {
+  id         String   @id @default(cuid())
+  requestId  String
+  request    SignatureRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  signerRole String   // freelancer | client
+  signerName String
+  method     String   // draw | type | upload
+  imageData  String?  // data URL of the signature image
+  ipAddress  String?
+  userAgent  String?
+  signedAt   DateTime @default(now())
+
+  @@index([requestId])
+}
+
+model Reminder {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contractId  String
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  label       String
+  type        String   // expiry | payment | milestone | custom
+  remindAt    DateTime
+  channelEmail Boolean @default(true)
+  channelPush  Boolean @default(true)
+  clientNudge  Boolean @default(false)
+  status      String   @default("scheduled") // scheduled | sent | done | snoozed
+  createdAt   DateTime @default(now())
+
+  @@index([userId, remindAt])
+  @@index([contractId])
+}
+
+model Payment {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contractId String
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  label      String?
+  amount     Float
+  currency   String   @default("USD")
+  dueDate    DateTime?
+  paidDate   DateTime?
+  status     String   @default("pending") // pending | paid | overdue
+
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([contractId])
+}
+
+// ── Admin-managed configuration ──────────────────────────────────────────────
+
+model Plan {
+  id            String   @id // free | solo | agency | custom slug
+  name          String
+  price         Float    @default(0)
+  contractLimit Int      @default(3) // -1 = unlimited
+  aiScan        Boolean  @default(false)
+  teamSeats     Int      @default(0)
+  whiteLabel    Boolean  @default(false)
+  blurb         String   @default("")
+  order         Int      @default(0)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Template {
+  id               String   @id // slug
+  name             String
+  category         String
+  icon             String   @default("file")
+  tagline          String   @default("")
+  popular          Boolean  @default(false)
+  workType         String   @default("General Services")
+  paymentSchedule  String   @default("split_50_50")
+  format           String   @default("classic") // classic | modern | legal | minimal
+  scopeLabel       String?
+  scopeDefault     String
+  fieldsJson       String   @default("[]")
+  extraClausesJson String   @default("[]")
+  omitPayment      Boolean  @default(false)
+  omitRevisions    Boolean  @default(false)
+  fillMinutes      Int      @default(2)
+  active           Boolean  @default(true)
+  order            Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model Announcement {
+  id        String    @id @default(cuid())
+  title     String
+  body      String
+  type      String    @default("info") // info | warning | success
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  expiresAt DateTime?
+}
+
+model Subscription {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                 String   @default("free") // free | solo | agency
+  status               String   @default("active") // active | past_due | canceled | paused
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  interval             String   @default("monthly") // monthly | annual
+  currentPeriodEnd     DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
